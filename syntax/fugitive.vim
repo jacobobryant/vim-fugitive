@@ -32,6 +32,8 @@ syn region fugitiveHunk start=/^\%(@@\+ -\)\@=/ end=/^\%([A-Za-z?@]\|$\)\@=/ con
 for s:section in ['Untracked', 'Unstaged', 'Staged']
   exe 'syn region fugitive' . s:section . 'Section start=/^\%(' . s:section . ' .*(\d\++\=)$\)\@=/ contains=fugitive' . s:section . 'Heading end=/^$/ fold'
   exe 'syn match fugitive' . s:section . 'Modifier /^[MADRCU?] / contained containedin=fugitive' . s:section . 'Section'
+  exe 'syn match fugitiveAdded /+\d\+\ze \+-\d\+$/ contained containedin=fugitive' . s:section . 'Section'
+  exe 'syn match fugitiveRemoved /-\d\+$/ contained containedin=fugitive' . s:section . 'Section'
   exe 'syn cluster fugitiveSection add=fugitive' . s:section . 'Section'
   exe 'syn match fugitive' . s:section . 'Heading /^[A-Z][a-z][^:]*\ze (\d\++\=)$/ contains=fugitivePreposition contained nextgroup=fugitiveCount skipwhite'
 endfor
@@ -53,5 +55,7 @@ hi def link fugitiveStop Function
 hi def link fugitiveHash Identifier
 hi def link fugitiveSymbolicRef Function
 hi def link fugitiveCount Number
+hi def fugitiveAdded ctermfg=DarkGreen guifg=#22863a
+hi def fugitiveRemoved ctermfg=DarkRed guifg=#cb2431
 
 let b:current_syntax = "fugitive"

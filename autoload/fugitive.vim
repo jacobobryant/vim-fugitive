@@ -2592,6 +2592,10 @@ function! s:FormatFile(dict) abort
   return a:dict.status . ' ' . a:dict.filename
 endfunction
 
+function! s:StripDiffStats(text) abort
+  return substitute(a:text, ' \++\d\+ \+-\d\+$', '', '')
+endfunction
+
 function! s:Format(val) abort
   if type(a:val) == type({})
     return s:Format{a:val.type}(a:val)
@@ -2617,6 +2621,39 @@ function! s:AddSection(to, label, lines, ...) abort
   call extend(a:to.lines, ['', a:label . (len(note) ? ': ' . note : ' (' . len(a:lines) . ')')] + s:Format(a:lines))
 endfunction
 
+function! s:DiffStats(diff_section, files) abort
+  call fugitive#Wait(a:diff_section)
+  let headers = {}
+  let stats = []
+  let i = 0
+  while i < len(a:files)
+    let file = a:files[i]
+    if file.status ==# 'U'
+      let header = 'diff --cc ' . s:Quote(file.relative[0])
+    else
+      let header = 'diff --git ' . s:Quote(file.relative[-1]) . ' ' . s:Quote(file.relative[0])
+    endif
+    let headers[header] = i
+    call add(stats, [0, 0])
+    let i += 1
+  endwhile
+  let current = -1
+  for line in a:diff_section.stdout
+    if line =~# '^diff '
+      let current = get(headers, line, -1)
+    elseif current < 0
+      continue
+    elseif line =~# '^+++ \|^--- '
+      continue
+    elseif line[0:0] ==# '+'
+      let stats[current][0] += 1
+    elseif line[0:0] ==# '-'
+      let stats[current][1] += 1
+    endif
+  endfor
+  return stats
+endfunction
+
 function! s:AddDiffSection(to, stat, label, files) abort
   if empty(a:files)
     return
@@ -2625,8 +2662,20 @@ function! s:AddDiffSection(to, stat, label, files) abort
   let expanded = a:stat.expanded[a:label]
   let was_expanded = get(getbufvar(a:stat.bufnr, 'fugitive_expanded', {}), a:label, {})
   call extend(a:to.lines, ['', a:label . ' (' . len(a:files) . ')'])
+  let stats = s:DiffStats(diff_section, a:files)
+  let formatted = map(copy(a:files), 's:Format(v:val)')
+  let max_name = max(map(copy(formatted), 'len(v:val)') + [0])
+  let max_adds = 1
+  let max_dels = 1
+  for [adds, dels] in stats
+    let max_adds = max([max_adds, len(string(adds))])
+    let max_dels = max([max_dels, len(string(dels))])
+  endfor
+  let i = 0
   for file in a:files
-    call add(a:to.lines, s:Format(file))
+    let suffix = printf('%*s %*s', max_adds + 1, '+' . stats[i][0], max_dels + 1, '-' . stats[i][1])
+    let line = formatted[i] . repeat(' ', max_name - len(formatted[i]) + 2) . suffix
+    call add(a:to.lines, line)
     if has_key(was_expanded, file.filename)
       let [diff, start] = s:StageInlineGetDiff(diff_section, file)
       if len(diff)
@@ -2634,6 +2683,7 @@ function! s:AddDiffSection(to, stat, label, files) abort
         call extend(a:to.lines, diff)
       endif
     endif
+    let i += 1
   endfor
 endfunction
 
@@ -2693,6 +2743,7 @@ function! s:MapStatus() abort
   call s:MapMotion('gp', "exe <SID>StageJump(v:count, 'Unpushed')")
   call s:MapMotion('gP', "exe <SID>StageJump(v:count, 'Unpulled')")
   call s:MapMotion('gr', "exe <SID>StageJump(v:count, 'Rebasing')")
+  call s:Map('n', 'gw', ":<C-U>execute <SID>ToggleDiffIgnoreWhitespace()<CR>", '<silent>')
   call s:Map('n', 'C', ":echoerr 'fugitive: C has been removed in favor of cc'<CR>", '<silent><unique>')
   call s:Map('n', 'a', ":echoerr 'fugitive: a has been removed in favor of s'<CR>", '<silent><unique>')
   call s:Map('n', 'i', ":<C-U>execute <SID>NextExpandedHunk(v:count1)<CR>", '<silent>')
@@ -2818,7 +2869,11 @@ function! s:StatusProcess(result, stat) abort
       endwhile
     endif
 
-    let diff_cmd = stat.cmd + ['-c', 'diff.suppressBlankEmpty=false', '-c', 'core.quotePath=false', 'diff', '--color=never', '--no-ext-diff', '--no-prefix']
+    let diff_cmd = stat.cmd + ['-c', 'diff.suppressBlankEmpty=false', '-c', 'core.quotePath=false', 'diff']
+    if stat.ignore_whitespace
+      call add(diff_cmd, '-w')
+    endif
+    call extend(diff_cmd, ['--color=never', '--no-ext-diff', '--no-prefix'])
     let stat.diff = {'Staged': {'stdout': ['']}, 'Unstaged': {'stdout': ['']}}
     if len(staged)
       let stat.diff['Staged'] = fugitive#Execute(diff_cmd + ['--cached'], function('len'))
@@ -2985,6 +3040,7 @@ function! s:StatusRender(stat) abort
     if get(fugitive#ConfigGetAll('advice.statusHints', config), 0, 'true') !~# '^\%(false\|no|off\|0\|\)$'
       call s:AddHeader(to, 'Help', 'g?')
     endif
+    call s:AddHeader(to, 'Whitespace', stat.ignore_whitespace ? 'ignored (gw)' : 'shown (gw)')
 
     call s:AddSection(to, 'Rebasing ' . rebasing_head, rebasing)
     call s:AddSection(to, get(get(sequencing, 0, {}), 'status', '') ==# 'revert' ? 'Reverting' : 'Cherry Picking', sequencing)
@@ -3046,7 +3102,8 @@ function! s:StatusRetrieve(bufnr, ...) abort
 
   let rev_parse_cmd = cmd + ['rev-parse', '--short', 'HEAD', '--']
 
-  let stat = {'bufnr': a:bufnr, 'reltime': reltime(), 'work_tree': s:Tree(dir), 'cmd': cmd, 'config': config}
+  let ignore_whitespace = getbufvar(a:bufnr, 'fugitive_diff_ignore_whitespace', 1)
+  let stat = {'bufnr': a:bufnr, 'reltime': reltime(), 'work_tree': s:Tree(dir), 'cmd': cmd, 'config': config, 'ignore_whitespace': ignore_whitespace}
   if empty(stat.work_tree)
     let stat.rev_parse = call('fugitive#Execute', [rev_parse_cmd, function('s:StatusProcess'), stat] + a:000)
     let stat.status = {}
@@ -4275,7 +4332,7 @@ function! s:StageSeek(info, fallback) abort
   endif
   let i = 0
   while len(getline(line))
-    let filename = matchstr(getline(line), '^[A-Z?] \zs.*')
+    let filename = s:StripDiffStats(matchstr(getline(line), '^[A-Z?] \zs.*'))
     if len(filename) &&
           \ ((info.filename[-1:-1] ==# '/' && filename[0 : len(info.filename) - 1] ==# info.filename) ||
           \ (filename[-1:-1] ==# '/' && filename ==# info.filename[0 : len(filename) - 1]) ||
@@ -4353,6 +4410,16 @@ function! s:ReloadStatus() abort
   call s:ExpireStatus(-1)
   call s:ReloadStatusBuffer()
   exe s:DoAutocmdChanged(-1)
+  return ''
+endfunction
+
+function! s:ToggleDiffIgnoreWhitespace() abort
+  if get(b:, 'fugitive_type', '') !=# 'index' || !empty(get(b:, 'fugitive_loading'))
+    return ''
+  endif
+  let b:fugitive_diff_ignore_whitespace = !get(b:, 'fugitive_diff_ignore_whitespace', 1)
+  call s:ReloadStatusBuffer()
+  echo 'fugitive: whitespace changes ' . (b:fugitive_diff_ignore_whitespace ? 'ignored' : 'shown')
   return ''
 endfunction
 
@@ -4496,7 +4563,7 @@ function! s:StageInfo(...) abort
       let index += 1
     endif
   endwhile
-  let text = matchstr(getline(lnum), '^[A-Z?] \zs.*')
+  let text = s:StripDiffStats(matchstr(getline(lnum), '^[A-Z?] \zs.*'))
   let file = s:StatusSectionFile(heading, text)
   let relative = get(file, 'relative', len(text) ? [text] : [])
   return {'section': matchstr(heading, '^\u\l\+'),
@@ -4578,7 +4645,7 @@ function! s:Selection(arg1, ...) abort
       endif
       let results[-1].lnum = lnum
     elseif line =~# '^[A-Z?] '
-      let text = matchstr(line, '^[A-Z?] \zs.*')
+      let text = s:StripDiffStats(matchstr(line, '^[A-Z?] \zs.*'))
       let file = s:StatusSectionFile(template.heading, text)
       let relative = get(file, 'relative', len(text) ? [text] : [])
       call add(results, extend(deepcopy(template), {

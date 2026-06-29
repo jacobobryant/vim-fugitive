@@ -447,6 +447,10 @@ gU                      Jump to file [count] in the "Unstaged" section.
                                                 *fugitive_gs*
 gs                      Jump to file [count] in the "Staged" section.
 
+                                                *fugitive_gw*
+gw                      Toggle whether status inline diffs ignore whitespace
+                        changes.
+
                                                 *fugitive_gp*
 gp                      Jump to file [count] in the "Unpushed" section.
 
