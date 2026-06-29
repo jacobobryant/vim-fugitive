@@ -5088,6 +5088,9 @@ function! s:StageApply(info, reverse, extra) abort
     throw 'fugitive: patching renamed file not yet supported'
   endif
   let cmd = ['apply', '-p0', '--recount'] + a:extra
+  if get(get(b:, 'fugitive_status', {}), 'ignore_whitespace', 0)
+    call add(cmd, '--ignore-whitespace')
+  endif
   let info = a:info
   let start = info.patch
   let end = info.lnum
